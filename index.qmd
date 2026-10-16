@@ -1,5 +1,6 @@
 ---
 title: "Lab 7: Regional frequency analysis with a CO2 trend"
+author: "Tianfeng Liao"
 week: 7
 module: 2
 date: 2026-10-09
@@ -351,7 +352,14 @@ end
 stations.κ = [fit.κ for fit in stations.fit]
 stations.trend_percent = trend_percent.(stations.fit)
 stations.level_2026 = level_2026.(stations.fit)
-stations[:, [:name, :miles, :n_years, :κ, :trend_percent, :level_2026]]
+nearby_stations = DataFrame(
+    station=stations.name[1:8],
+    miles=round.(stations.miles[1:8]; digits=1),
+    years=stations.n_years[1:8],
+    trend_pct=round.(stations.trend_percent[1:8]; digits=1),
+    level_in=round.(stations.level_2026[1:8]; digits=1),
+)
+nearby_stations
 ```
 
 ```{julia}
@@ -388,8 +396,12 @@ end
 **Your answer:** How much do the trends differ between stations a few miles apart?
 Is that more likely a real difference in climate or noise from short records, and what in the table supports your answer?
 
+Scholes Field has a trend of about **+3%**, while the Galveston station 4.5 miles away has about **-15%**, a difference of 18 percentage points. The station trends range from about -22% to +89%, and several records are only 21--31 years long. This looks more like noise from short records than a real climate difference over a few miles.
+
 **Your answer:** How much does $x_t$ change over Scholes Field's 21 years, compared with a record that starts around 1900?
 So what sets Scholes Field's trend when you fit it alone?
+
+From 1997 to 2017, $x_t$ changes by **0.161 CO2 doublings**, compared with **0.463** from 1900 to 2017. With so little change in $x_t$, a few large observations and the prior have a strong effect on the Scholes Field trend.
 
 
 ## Borrowing from neighbors
@@ -485,8 +497,12 @@ The weighted likelihood treats every station's value as independent.
 Which method keeps the 2017 values together, and which interval would you expect to be wider?
 
 ```{julia}
-# Your code here
+#| solution: false
+maxima_2017 = ann_max_region[ann_max_region.year .== 2017, :]
+combine(groupby(maxima_2017, :date), nrow => :n_stations)
 ```
+
+Seventeen stations have a 2017 maximum: 8 on August 26, 6 on August 27, 2 on August 28, and 1 on August 29. The year bootstrap keeps these values together, so its interval should be wider. The bootstrap interval is 12.2--20.6 inches, compared with 13.5--20.2 inches for MCMC.
 
 
 ## Your analysis
@@ -499,6 +515,44 @@ Then code one of the other weight functions and run it the same way.
 **Your answer:** Make a table with one row per weight function you tried, giving the number of stations kept, $n_\text{eff}$, the pooled trend, and the 2026 100-year level with its bootstrap interval.
 Which settings give an estimate dominated by variance, and which by bias?
 Name a physical reason a wide region could be biased for a station on Galveston Island.
+
+```{julia}
+#| solution: false
+function summarize_weights(label, weight_fn; n_boot=500)
+    data = copy(ann_max_texas)
+    data.w = weight_fn.(data.miles)
+    data = data[data.w .> 0, :]
+    station_table = combine(groupby(data, [:id, :name, :lat, :lon, :miles, :w]),
+                            nrow => :n_years)
+    fit = weighted_gevfit(data.prcp_in, data.x, data.w)
+
+    years_here = unique(data.year)
+    levels = map(1:n_boot) do _
+        picked = rand(years_here, length(years_here))
+        rows = reduce(vcat, [data[data.year .== yr, :] for yr in picked])
+        level_2026(weighted_gevfit(rows.prcp_in, rows.x, rows.w))
+    end
+    lo, hi = quantile(levels, [0.025, 0.975])
+
+    return (weight=label,
+            n=nrow(station_table),
+            neff=round(sum(station_table.w); digits=1),
+            trend_pct=round(trend_percent(fit); digits=1),
+            level_in=round(level_2026(fit); digits=1),
+            boot95_in=@sprintf("%.1f to %.1f", lo, hi))
+end
+
+Random.seed!(544)
+weight_results = DataFrame([
+    summarize_weights("linear 25 mi", d -> max(0.0, 1 - d / 25)),
+    summarize_weights("linear 50 mi", d -> max(0.0, 1 - d / 50)),
+    summarize_weights("linear 100 mi", d -> max(0.0, 1 - d / 100)),
+    summarize_weights("ROI 50 mi", d -> d <= 50 ? 1.0 : 0.0),
+])
+weight_results
+```
+
+The 25-mile kernel has high variance because it uses only four stations and has $n_\text{eff}=1.9$. The 100-mile and region-of-influence fits may be biased because they give more weight to inland stations, while Galveston is more exposed to Gulf moisture and tropical cyclones. I use the **50-mile linear kernel** as a middle choice, with $n_\text{eff}=6.1$.
 
 
 ### Share only the trend and shape
@@ -557,13 +611,42 @@ end
 1. `station[i]` is the row of `stations`, from 1 to `n_stations`, that `y[i]` came from.
 1. Scholes Field's row of `stations`.
 
+I sample the posterior for this model to get an interval.
+
+```{julia}
+#| solution: false
+#| output: false
+Random.seed!(543)
+shared_chain = sample(model, NUTS(0.99), 1000;
+                      initial_params=start, progress=false)
+shared_mcmc_fits = [
+    (μ0=a[k], κ=b[k], β=c, ξ=d)
+    for (a, b, c, d) in zip(vec(shared_chain[:μ0]), vec(shared_chain[:κ]),
+                             vec(shared_chain[:β]), vec(shared_chain[:ξ]))
+]
+shared_levels = level_2026.(shared_mcmc_fits)
+shared_trends = trend_percent.(shared_mcmc_fits)
+```
+
+```{julia}
+#| solution: false
+@printf("shared model: 2026 100-year level %.1f inches, 95%% interval %.1f to %.1f; trend %.0f%%, interval %.0f%% to %.0f%%\n",
+        median(shared_levels), quantile(shared_levels, 0.025),
+        quantile(shared_levels, 0.975), median(shared_trends),
+        quantile(shared_trends, 0.025), quantile(shared_trends, 0.975))
+```
+
 **Your answer:** Which parameters should be shared for Scholes Field, and why?
+
+I share **the trend $\beta$ and shape $\xi$** because nearby stations should have similar long-term trends and tail behavior. I keep $\mu_0$ and $\kappa$ separate because baseline rainfall and variability can differ between Galveston Island and inland stations.
 
 
 ### Defend a choice
 
 **Your answer:** What is your estimate of the 100-year daily rainfall at Galveston Scholes Field in 2026, with an interval?
 Say which weight function and radius you chose, which parameters you shared, and which interval you report, and defend each choice.
+
+My estimate is **16.2 inches**, with a **95% MCMC credible interval of 11.8 to 23.8 inches**. I use the 50-mile linear kernel because it avoids the small sample of the 25-mile fit without giving too much weight to inland stations. I share $\beta$ and $\xi$, while keeping $\mu_0$ and $\kappa$ station specific. I report the MCMC interval from this final model.
 
 ## Turning it in
 
